@@ -40,13 +40,41 @@ Both take the same arguments. `model` is `"laplace"` or `"gauss"`.
 ## Audio demo
 
 ```bash
-python demo_audio.py
+python demo_audio.py           # short clips, about 4.4 s each
+python demo_audio.py --long    # two genuine 2-minute recordings
 ```
 
 Simulates a two-speaker reverberant mixture, separates it with both
-algorithms, and writes wav files to `output_audio/`. Speech is two CMU
-ARCTIC utterances, downloaded on first run. Needs `pyroomacoustics`
-and `scipy` as well as NumPy.
+algorithms, reports quality and runtime, and writes wav files. Needs
+`pyroomacoustics` and `scipy` as well as NumPy.
+
+The two modes differ in more than duration:
+
+| | default | `--long` |
+| --- | --- | --- |
+| Speech | two CMU ARCTIC clips, ~4.4 s | two 120 s recordings, one male one female |
+| Repetition | 4x, so the algorithms have frames to adapt | none needed |
+| Output folder | `output_audio/` | `output_audio_long/` |
+| Projection back | fitted once | refitted every 2 s |
+
+The long material is built by concatenating consecutive utterances from
+the CMU ARCTIC concat15 release, downloaded on first use if a local copy
+is not found. Its output folder is git-ignored, being 26 MB and
+reproducible with one command.
+
+Projection back is segmented in long mode because a single scale factor
+per frequency bin cannot track a demixing matrix that keeps adapting
+across two minutes. Fitting once there costs about 5.7 dB of SDR.
+
+Typical output:
+
+```
+online_iss   SDR=[2.22 2.21]  SIR=[13.34 13.4 ]  time=  2.81 s   0.75 ms/block  realtime factor=0.023
+online_ip    SDR=[2.23 2.25]  SIR=[13.34 13.77]  time=  4.41 s   1.17 ms/block  realtime factor=0.037
+```
+
+The realtime factor is the fraction of the time budget consumed, so
+0.023 means roughly 43x headroom for live use.
 
 Committed output of that script is in `output_audio/`:
 

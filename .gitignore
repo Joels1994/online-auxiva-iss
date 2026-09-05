@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 samples/
 .DS_Store
+samples_long/
+output_audio_long/
+online_iva_ipynb/samples/
+online_iva_ipynb/samples_long/
+online_iva_ipynb/output_audio/
+online_iva_ipynb/output_audio_long/
