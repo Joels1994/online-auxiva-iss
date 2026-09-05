@@ -95,6 +95,43 @@ covariance once per frame (required for the recursion to be anchored
 correctly, see below), which adds the same overhead to each and so
 compresses the ratio toward 1.0.
 
+The same shape holds at `n_iter=1`, so the crossover is a property of
+the online formulation rather than of the sweep count:
+
+| Channels | IP | ISS | ISS speedup |
+| --- | --- | --- | --- |
+| 2 | 0.22 | 0.15 | 1.42x |
+| 4 | 0.61 | 0.47 | 1.29x |
+| 6 | 1.49 | 1.25 | 1.19x |
+| 8 | 3.00 | 2.96 | 1.01x |
+| 10 | 5.64 | 5.62 | 1.00x |
+| 12 | 9.48 | 10.36 | 0.91x |
+
+## Choosing n_iter
+
+On the two-source speech mixture of `demo_audio.py`:
+
+| n_iter | Algorithm | ms/frame | Mean SDR (dB) | Mean SIR (dB) |
+| --- | --- | --- | --- | --- |
+| 1 | ISS | 0.93 | 2.59 | 14.52 |
+| 1 | IP | 1.49 | 2.10 | 13.97 |
+| 3 | ISS | 2.64 | 3.20 | 13.78 |
+| 3 | IP | 4.12 | 3.17 | 13.78 |
+
+A single sweep per frame is a good operating point. It gives up about
+0.6 dB of SDR but gains roughly 0.7 dB of SIR, at just under a third
+of the cost. For a streaming system, where per-frame cost is the
+binding constraint, that trade is usually worth taking.
+
+ISS also leads IP on quality at `n_iter=1` (2.59 against 2.10 SDR),
+while at `n_iter=3` the two are indistinguishable. With one sweep the
+updates have not yet reached the same fixed point, so the difference in
+per-sweep progress is visible, and it favours ISS. That is the regime
+an online system actually runs in.
+
+The default in both functions is `n_iter=3`, kept so the numbers
+elsewhere in this README reproduce; pass `n_iter=1` for streaming use.
+
 On simulated two-source speech mixtures the two reach essentially the
 same separation quality, as expected since they optimize the same cost
 function:
