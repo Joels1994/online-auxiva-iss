@@ -64,11 +64,17 @@ between files. Scores for that run:
 
 | Method | SDR (dB) | SIR (dB) |
 | --- | --- | --- |
-| Online ISS | 2.60 / 3.79 | 15.24 / 12.33 |
-| Online IP | 2.57 / 3.78 | 15.26 / 12.30 |
+| Online ISS | 0.59 / 0.25 | 12.94 / 17.79 |
+| Online IP | 0.59 / 0.25 | 13.09 / 17.77 |
 
+Measured at a genuine 15 dB SNR, with the default 1024-sample block.
 The saved segment is the final repetition of the mixture, since the
 online methods need time to adapt.
+
+The block size is set in `main()` and defaults to 1024, a 64 ms window
+advancing 32 ms at a time. That favours low latency; a larger block
+gives noticeably better SDR, see `demo_blocksize.py` and the table
+below.
 
 ## Benchmark
 
@@ -109,37 +115,49 @@ the online formulation rather than of the sweep count:
 
 ## Choosing n_iter
 
-On the two-source speech mixture of `demo_audio.py`:
+On the two-source speech mixture of `demo_audio.py`, at the default
+1024-sample block and 15 dB SNR:
 
-| n_iter | Algorithm | ms/frame | Mean SDR (dB) | Mean SIR (dB) |
+| n_iter | Algorithm | ms/block | Mean SDR (dB) | Mean SIR (dB) |
 | --- | --- | --- | --- | --- |
-| 1 | ISS | 0.93 | 2.59 | 14.52 |
-| 1 | IP | 1.49 | 2.10 | 13.97 |
-| 3 | ISS | 2.64 | 3.20 | 13.78 |
-| 3 | IP | 4.12 | 3.17 | 13.78 |
+| 1 | ISS | 0.26 | 0.57 | 14.48 |
+| 1 | IP | 0.41 | 0.59 | 14.67 |
+| 3 | ISS | 0.73 | 0.42 | 15.36 |
+| 3 | IP | 1.16 | 0.42 | 15.43 |
 
-A single sweep per frame is a good operating point. It gives up about
-0.6 dB of SDR but gains roughly 0.7 dB of SIR, at just under a third
-of the cost. For a streaming system, where per-frame cost is the
-binding constraint, that trade is usually worth taking.
+A single sweep per block is a reasonable operating point: it runs
+about 2.8x faster, and here it even edges ahead on SDR while giving up
+roughly 0.9 dB of SIR. For a streaming system, where per-block cost is
+the binding constraint, that trade is usually worth taking.
 
-ISS also leads IP on quality at `n_iter=1` (2.59 against 2.10 SDR),
-while at `n_iter=3` the two are indistinguishable. With one sweep the
-updates have not yet reached the same fixed point, so the difference in
-per-sweep progress is visible, and it favours ISS. That is the regime
-an online system actually runs in.
+The default in both functions is `n_iter=3`; pass `n_iter=1` for
+streaming use.
 
-The default in both functions is `n_iter=3`, kept so the numbers
-elsewhere in this README reproduce; pass `n_iter=1` for streaming use.
+Note that at a larger block size and the earlier, mistakenly high SNR,
+ISS clearly led IP on quality at `n_iter=1`. That gap does not survive
+the corrected noise level, so treat it as an artifact rather than a
+property of the update rule.
 
-On simulated two-source speech mixtures the two reach essentially the
-same separation quality, as expected since they optimize the same cost
-function:
+On simulated two-source speech mixtures at 15 dB SNR the two reach
+essentially the same separation quality, as expected since they
+optimize the same cost function. Mean over the two sources, by block
+size:
 
-| Method | SDR (dB) | SIR (dB) |
-| --- | --- | --- |
-| Online ISS | 2.21 / 0.55 | 8.59 / 12.43 |
-| Online IP | 2.29 / 0.56 | 8.79 / 12.45 |
+| Block | Algo | ms/block | SDR (dB) | SIR (dB) |
+| --- | --- | --- | --- | --- |
+| 1024 | ISS | 0.72 | 0.42 | 15.36 |
+| 1024 | IP | 1.14 | 0.42 | 15.43 |
+| 2048 | ISS | 1.36 | 2.27 | 15.24 |
+| 2048 | IP | 2.13 | 2.26 | 15.28 |
+| 4096 | ISS | 2.55 | 2.98 | 14.95 |
+| 4096 | IP | 4.09 | 2.98 | 15.01 |
+
+Reproduce with `python demo_blocksize.py`. Note that SIR barely moves
+with block size while SDR varies by 2.5 dB: the short window separates
+about as well, it reconstructs worse, which is the time-domain
+aliasing you get once the effective filter no longer fits inside the
+window. Reverberation here runs to roughly 300 ms, far longer than a
+64 ms block.
 
 ## Known limitations
 
@@ -216,3 +234,19 @@ paper's Algorithm 1 and the batch implementations in piva.
 Speech samples used by the demo are from the
 [CMU ARCTIC](http://festvox.org/cmu_arctic/) corpus, fetched from the
 pyroomacoustics example data.
+
+## Correctness checks
+
+`verify_online.py` reimplements both algorithms with fully explicit
+scalar loops, written straight from the Algorithm 1 pseudocode and
+sharing no code with the vectorized versions, then compares the two.
+Agreement is at the 1e-14 level across both source models and both
+iteration counts.
+
+Separately, on a synthetic mixture whose sources follow the IVA
+dependency model and whose mixing matrix is known, both algorithms
+reach a normalized Amari distance of about 0.009, against 0.53 for the
+unseparated input. Both landing on the same figure is expected, since
+they minimize the same cost function.
+
+Run with `python verify_online.py`.

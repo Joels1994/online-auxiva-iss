@@ -60,6 +60,13 @@ OUTPUT_DIR = "output_audio"
 # give them enough frames to converge; only the last pass is scored
 N_REPEAT_SIGNAL = 4
 
+# Target signal-to-noise ratio at the reference microphone, in dB.
+# The noise standard deviation is derived from the measured signal
+# level below. Note that dB for an amplitude ratio uses 20 log10, not
+# 10 log10; getting that wrong silently makes the mixture far cleaner
+# than intended.
+SNR_DB = 15
+
 
 def get_samples():
     os.makedirs(SAMPLE_DIR, exist_ok=True)
@@ -112,7 +119,7 @@ def make_room(room_dim, n_mics, source_signals, fs, max_order, absorption, radiu
 
 def main():
     fs = 16000
-    framesize, n_src, n_mics = 4096, 2, 2
+    framesize, n_src, n_mics = 1024, 2, 2
     hop = framesize // 2
     win_a = np.hamming(framesize)
     win_s = compute_synthesis_window(win_a, hop)
@@ -128,8 +135,9 @@ def main():
     premix = room.simulate(return_premix=True)
     premix /= np.std(premix[:, 0, :], axis=1)[:, None, None]
 
-    sigma_n = 10 ** (-15 / 10) * premix.shape[0]
-    mix = np.sum(premix, axis=0) + sigma_n * np.random.randn(*premix.shape[1:])
+    clean = np.sum(premix, axis=0)
+    sigma_n = np.std(clean[0]) * 10 ** (-SNR_DB / 20)
+    mix = clean + sigma_n * np.random.randn(*premix.shape[1:])
 
     one_pass_len = mix.shape[1]
     X = stft_analysis(
