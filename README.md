@@ -37,6 +37,39 @@ Y = auxiva_iss_online(X, n_iter=3, alpha=0.96, model="laplace")
 
 Both take the same arguments. `model` is `"laplace"` or `"gauss"`.
 
+## Audio demo
+
+```bash
+python demo_audio.py
+```
+
+Simulates a two-speaker reverberant mixture, separates it with both
+algorithms, and writes wav files to `output_audio/`. Speech is two CMU
+ARCTIC utterances, downloaded on first run. Needs `pyroomacoustics`
+and `scipy` as well as NumPy.
+
+Committed output of that script is in `output_audio/`:
+
+| File | What it is |
+| --- | --- |
+| `mixture_mic0.wav` | what the first microphone hears, both speakers overlapping |
+| `reference_src<i>.wav` | the clean source at that same mic, the target |
+| `online_iss_src<i>.wav` | separated by online AuxIVA-ISS |
+| `online_ip_src<i>.wav` | separated by online AuxIVA-IP |
+
+Outputs are permutation-aligned, so `..._src1.wav` corresponds to
+`reference_src1.wav` in every file. Each file is peak-normalized
+individually so it is audible, which means loudness is not comparable
+between files. Scores for that run:
+
+| Method | SDR (dB) | SIR (dB) |
+| --- | --- | --- |
+| Online ISS | 2.60 / 3.79 | 15.24 / 12.33 |
+| Online IP | 2.57 / 3.78 | 15.26 / 12.30 |
+
+The saved segment is the final repetition of the mixture, since the
+online methods need time to adapt.
+
 ## Benchmark
 
 ```bash
@@ -110,4 +143,19 @@ cost about 1.5 dB of SDR here before being corrected.
 ## Requirements
 
 NumPy, and SciPy for the SDR/SIR metrics in `online_iva/metrics.py`.
-The runtime benchmark needs only NumPy.
+The runtime benchmark needs only NumPy. The audio demo additionally
+needs `pyroomacoustics`.
+
+## License and attribution
+
+GPL-3.0, see `LICENSE`.
+
+`online_iva/projection_back.py` and `online_iva/metrics.py` are taken
+from [piva](https://github.com/fakufaku/piva) by Robin Scheibler, which
+is GPL-3.0. The online algorithms in `auxiva_iss_online.py` and
+`auxiva_ip_online.py` were written for this repository, following the
+paper's Algorithm 1 and the batch implementations in piva.
+
+Speech samples used by the demo are from the
+[CMU ARCTIC](http://festvox.org/cmu_arctic/) corpus, fetched from the
+pyroomacoustics example data.
