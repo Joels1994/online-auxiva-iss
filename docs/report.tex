@@ -1,0 +1,773 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{graphicx}
+
+\hypersetup{colorlinks=true,linkcolor=blue!50!black,urlcolor=blue!50!black,
+            citecolor=blue!50!black}
+
+\definecolor{codebg}{gray}{0.96}
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{codebg},
+  breaklines=true,
+  frame=none,
+  language=Python,
+  keywordstyle=\color{blue!60!black},
+  commentstyle=\color{green!35!black}\itshape,
+  stringstyle=\color{red!50!black},
+  showstringspaces=false,
+  xleftmargin=1em,
+  aboveskip=0.8em,
+  belowskip=0.8em,
+}
+
+\newcommand{\W}{\boldsymbol{W}}
+\newcommand{\V}{\boldsymbol{V}}
+\newcommand{\U}{\boldsymbol{U}}
+\newcommand{\x}{\boldsymbol{x}}
+\newcommand{\y}{\boldsymbol{y}}
+\newcommand{\w}{\boldsymbol{w}}
+\newcommand{\vv}{\boldsymbol{v}}
+\newcommand{\e}{\boldsymbol{e}}
+\newcommand{\herm}{^{\mathsf{H}}}
+
+\title{\textbf{Online AuxIVA-ISS and AuxIVA-IP}\\[0.3em]
+\large Implementation, verification, and a runtime study against the batch algorithms}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-2.5em}
+
+\begin{abstract}
+\noindent
+This report documents a from-scratch implementation of online (frame-recursive)
+independent vector analysis using two update rules, iterative source steering
+(ISS) and iterative projection (IP), together with batch reference
+implementations of both. It covers the mathematics of each algorithm, a detailed
+walk through the code, the verification strategy used to establish correctness,
+and the measured results.
+
+The central finding is that the speed advantage ISS enjoys offline does not
+transfer to the online setting. Offline it grows with channel count, from
+$0.83\times$ at two channels to $2.68\times$ at sixteen. Online it decays over
+the same range, from $1.34\times$ to $0.85\times$. The reason is structural
+rather than an artefact of implementation, and is explained in
+Section~\ref{sec:complexity}.
+
+Six defects were found and corrected along the way, several of which changed
+reported numbers materially. These are documented in Section~\ref{sec:pitfalls}
+rather than quietly fixed, because each is easy to reintroduce.
+\end{abstract}
+
+\tableofcontents
+
+%======================================================================
+\section{Problem setting and notation}
+
+We separate $K$ sound sources recorded by $M$ microphones. Convolutive mixing in
+the time domain becomes approximately multiplicative in each narrow frequency
+band, so in the short-time Fourier transform (STFT) domain
+%
+\begin{equation}
+\x_{fn} = \boldsymbol{A}_f \boldsymbol{s}_{fn},
+\end{equation}
+%
+where $f = 1,\dots,F$ indexes frequency, $n = 1,\dots,N$ indexes time frame,
+$\boldsymbol{A}_f$ is the mixing matrix, and $\boldsymbol{s}_{fn}$ collects the
+source signals. This approximation holds when the transform is long relative to
+the room impulse response, a point that returns in Section~\ref{sec:blocksize}.
+
+Throughout we assume the determined case $M = K$, so $\boldsymbol{A}_f$ is
+square and invertible. The goal is a demixing matrix
+$\W_f = [\w_{1f} \cdots \w_{Mf}]\herm$ such that
+%
+\begin{equation}
+\y_{fn} = \W_f \x_{fn}
+\end{equation}
+%
+recovers the sources. Note carefully that the \emph{rows} of $\W_f$ are the
+conjugate transposes $\w_{kf}\herm$; this convention causes a specific class of
+implementation bug, discussed in Section~\ref{sec:conventions}.
+
+%----------------------------------------------------------------------
+\subsection{The cost function}
+
+Under the assumptions that sources are independent and follow a spherical
+super-Gaussian distribution, the negative log-likelihood is
+%
+\begin{equation}
+\mathcal{L} = \sum_{k=1}^{M} G\!\left(\sqrt{\textstyle\sum_f |\w_{kf}\herm \x_{fn}|^2}\right)
+ - 2\sum_f \log|\det(\W_f)|.
+\label{eq:cost}
+\end{equation}
+%
+Direct minimisation is awkward, so auxiliary function (majorisation-minimisation)
+optimisation is used. The cost is majorised by
+%
+\begin{equation}
+\mathcal{L} \le \mathcal{L}_2 =
+ \sum_{f}\sum_{k} \w_{kf}\herm \V_{kf} \w_{kf} - 2\sum_f \log|\det(\W_f)|,
+\label{eq:aux}
+\end{equation}
+%
+with the auxiliary variables
+%
+\begin{equation}
+r_{kn} = \sqrt{\sum_f |\w_{kf}\herm \x_{fn}|^2},
+\qquad
+\V_{kf} = \frac{1}{N}\sum_n \varphi(r_{kn})\, \x_{fn}\x_{fn}\herm .
+\label{eq:auxvars}
+\end{equation}
+%
+Here $\varphi(r) = G'(r)/(2r)$ is a positive weight that is small when a source
+is active and large when it is not. Two source models are supported:
+%
+\begin{equation}
+\varphi_{\text{Laplace}}(r) = \frac{1}{2r},
+\qquad
+\varphi_{\text{Gauss}}(r) = \frac{F}{r^2}.
+\label{eq:phi}
+\end{equation}
+%
+Both algorithms below minimise the same $\mathcal{L}_2$. They differ only in
+\emph{how} they descend it, which is why they reach equivalent separation
+quality and differ only in cost. Every experiment in this report confirms that
+equivalence, typically agreeing to within $0.03$~dB.
+
+%======================================================================
+\section{The batch algorithms}
+
+\subsection{AuxIVA-IP: iterative projection}
+
+IP minimises $\mathcal{L}_2$ with respect to one row of $\W_f$ at a time, holding
+the others fixed. Each row has a closed-form solution:
+%
+\begin{equation}
+\w_{kf} \leftarrow (\W_f \V_{kf})^{-1}\e_k,
+\qquad
+\w_{kf} \leftarrow \frac{\w_{kf}}{\sqrt{\w_{kf}\herm \V_{kf} \w_{kf}}}.
+\label{eq:ip}
+\end{equation}
+%
+The first step is a linear solve; the second fixes the scale of the demixing
+vector. Per source and per iteration this requires building an $M\times M$
+covariance and solving against it, which is the source of both its cost and its
+potential instability when $\V_{kf}$ becomes ill-conditioned.
+
+\subsection{AuxIVA-ISS: iterative source steering}
+
+ISS instead applies a rank-1 update to the \emph{whole} matrix,
+%
+\begin{equation}
+\W_f \leftarrow \W_f - \vv_{kf}\,\w_{kf}\herm ,
+\label{eq:issupdate}
+\end{equation}
+%
+repeated for $k = 1,\dots,M$. Minimising $\mathcal{L}_2$ over $\vv_{kf}$ gives
+%
+\begin{equation}
+v_{mk} =
+\begin{cases}
+\dfrac{\w_m\herm \V_m \w_k}{\w_k\herm \V_m \w_k} & m \ne k,\\[1.1em]
+1 - \left(\w_k\herm \V_k \w_k\right)^{-1/2} & m = k.
+\end{cases}
+\label{eq:issv}
+\end{equation}
+%
+No matrix inverse appears. Two properties matter for what follows.
+
+First, the quantities needed are only
+%
+\begin{equation}
+\w_m\herm \V_m \w_k = \sum_n \varphi(r_{mn})\, y_{mn} y_{kn}^{*},
+\qquad
+\w_k\herm \V_m \w_k = \sum_n \varphi(r_{mn})\, |y_{kn}|^2 ,
+\label{eq:issefficient}
+\end{equation}
+%
+which are computable \emph{directly from the separated outputs} $y$, by summing
+over time. The covariance matrices never need to be formed. Each costs $O(N)$,
+and $M$ of them are needed per source update, giving $O(MN)$ per update.
+
+Second, the output can be updated without ever storing $\W_f$ at all:
+%
+\begin{equation}
+\y_n \leftarrow (\W - \vv_k \w_k\herm)\x_n = \y_n - \vv_k y_{kn}.
+\label{eq:issy}
+\end{equation}
+%
+Offline this permits an in-place implementation using $O(1)$ extra memory.
+Section~\ref{sec:whyonlinediffers} shows that this is precisely what the online
+setting cannot exploit.
+
+Note the index on $\V_m$ in~\eqref{eq:issv}: the covariance belongs to the row
+being updated, $m$, not to the pivot $k$. This is easy to get backwards and was
+verified against both the reference implementation and a brute-force rewrite.
+
+%======================================================================
+\section{The online algorithms}
+
+\subsection{From batch statistics to a recursion}
+
+The batch auxiliary variable~\eqref{eq:auxvars} averages over all $N$ frames.
+Online, only the current frame is available, and a single frame yields a rank-1
+matrix that carries no useful spatial information on its own. The standard
+remedy is to replace the batch average with an exponentially forgotten
+recursion,
+%
+\begin{equation}
+\U_{kft} \leftarrow \alpha\,\U_{kf(t-1)} + (1-\alpha)\,\varphi(r_{kt})\,
+ \x_{ft}\x_{ft}\herm ,
+\label{eq:recursion}
+\end{equation}
+%
+with forgetting factor $\alpha$, typically $0.96$. The effective memory is about
+$1/(1-\alpha)$ frames, roughly $25$ at $\alpha = 0.96$. The auxiliary variable
+is computed from the current frame alone,
+%
+\begin{equation}
+r_{kt} = \sqrt{\sum_f |\w_{kft}\herm \x_{ft}|^2}.
+\end{equation}
+%
+Per incoming frame, a small number of sweeps $N_{\text{iter}}$ is applied,
+typically one to three, rather than the dozens of full passes the batch method
+makes. Frame $t$'s output depends only on frames $\le t$, so the separation is
+causal.
+
+\subsection{Online AuxIVA-ISS}
+
+Algorithm~\ref{alg:iss} states the procedure. It is the algorithm of Nakashima
+and Ono, restricted to the case where every source is updated on every sweep;
+the ``flexible'' variant that updates only moving sources is not implemented
+here and is noted as a limitation in Section~\ref{sec:limitations}.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{l}
+\toprule
+\textbf{Algorithm 1:} Online AuxIVA-ISS \\
+\midrule
+\textbf{Input:} mixture $\x_{ft}$, iterations $N_{\text{iter}}$, forgetting factor $\alpha$, \\
+\quad\quad initial $\W_{f0}$, initial $\U_{kf0}$ \\
+\textbf{Output:} separated $\y_{ft}$ \\[0.3em]
+\textbf{for} $t = 1,\dots,T$ \textbf{do} \\
+\quad $\W_{ft} \leftarrow \W_{f(t-1)}$ \\
+\quad \textbf{for} $\text{iter} = 1,\dots,N_{\text{iter}}$ \textbf{do} \\
+\quad\quad \textbf{for} $k = 1,\dots,K$ \textbf{do} \\
+\quad\quad\quad $r_{kt} \leftarrow \sqrt{\sum_f |\w_{kft}\herm \x_{ft}|^2}$ \\
+\quad\quad\quad $\U_{kft} \leftarrow \alpha \U_{kf(t-1)} + (1-\alpha)\varphi(r_{kt})\x_{ft}\x_{ft}\herm$ \\
+\quad\quad\quad \textbf{for} $m = 1,\dots,M$ \textbf{do} \\
+\quad\quad\quad\quad $v_{mkf} \leftarrow
+  \dfrac{\w_{mft}\herm \U_{mft}\w_{kft}}{\w_{kft}\herm \U_{mft}\w_{kft}}$ if $m \ne k$ \\
+\quad\quad\quad\quad $v_{kkf} \leftarrow 1 - (\w_{kft}\herm \U_{kft}\w_{kft})^{-1/2}$ \\
+\quad\quad\quad $\W_{ft} \leftarrow \W_{ft} - \vv_{kf}\w_{kft}\herm$ \\
+\quad $\y_{ft} = \W_{ft}\x_{ft}$ \\
+\bottomrule
+\end{tabular}
+\label{alg:iss}
+\end{table}
+
+Two details deserve emphasis, both of which were sources of error.
+
+\paragraph{The recursion is anchored to the previous frame.} In
+\eqref{eq:recursion} the right-hand side uses $\U_{kf(t-1)}$, the covariance as
+it stood at the \emph{end of the previous frame}, not the running value from the
+current sweep. The purpose of the inner loop is to recompute $r_{kt}$ as $\W$
+improves; decaying by $\alpha$ again, or injecting $\x\x\herm$ a second time, is
+not intended. Getting this wrong is silent: the algorithm still separates, just
+worse. Section~\ref{sec:pitfalls} quantifies the cost at about $1.5$~dB of SDR.
+
+\paragraph{Sources are swept sequentially.} Within a sweep, source $k+1$ sees
+the demixing matrix already updated by source $k$. This is Gauss-Seidel rather
+than Jacobi, and it is deliberate: the pivot row must be frozen while all rows
+are updated relative to it, but the next pivot uses the fresh matrix.
+
+\subsection{Online AuxIVA-IP}
+
+The IP baseline is structured identically, sharing the recursion
+\eqref{eq:recursion}, the auxiliary variable, and the per-frame sweep. Only the
+update differs: where ISS applies~\eqref{eq:issupdate}, IP performs the solve
+and normalisation of~\eqref{eq:ip}. This was a deliberate design choice, so that
+a timing comparison measures the update rule rather than incidental differences
+in implementation style.
+
+%======================================================================
+\section{Implementation}
+
+\subsection{Storage conventions, and a trap}
+\label{sec:conventions}
+
+The demixing matrix is stored so that \verb|y = W @ x| holds directly, with no
+extra conjugation at use time. Consequently row $k$ of the stored array
+\emph{is} $\w_k\herm$, and the true steering vector is its conjugate:
+%
+\begin{equation}
+\texttt{W[f,k,:]} = \w_k\herm,
+\qquad\text{hence}\qquad
+\w_k = \overline{\texttt{W[f,k,:]}} .
+\end{equation}
+%
+This matters for the Hermitian forms in~\eqref{eq:issv}. Writing $a$ for the
+stored row, the correct evaluation is
+%
+\begin{equation}
+\w_k\herm \U \w_k = a\,\U\,\bar{a},
+\end{equation}
+%
+with $\U$ applied to the \emph{conjugated} row and the plain row contracted on
+the left. The natural-looking alternative $\bar{a}\,\U\,a$ is a different
+quantity. Both are real when $\U$ is Hermitian, so the error produces
+plausible numbers rather than obvious nonsense. It was caught by a direct
+numerical check:
+
+\begin{lstlisting}
+true w_k^H U w_k = -1.7374291699646307
+E1 (naive, using a twice)     = -2.722010666857075   # wrong
+E2 (a on left, conj(a) via U) = -1.7374291699646305  # correct
+\end{lstlisting}
+
+The corresponding code reads:
+
+\begin{lstlisting}
+# U[m] @ conj(w_k) for every source m, shape (n_src, n_freq, n_chan)
+Uk_wk = (U @ np.conj(w_k_frozen)[None, :, :, None])[..., 0]
+
+denom = np.real(np.sum(w_k_frozen[None, :, :] * Uk_wk, axis=-1))
+denom = np.maximum(denom, eps)
+
+W_rows = np.transpose(W, (1, 0, 2))
+numer = np.sum(W_rows * Uk_wk, axis=-1)
+\end{lstlisting}
+
+Note that \verb|numer| contracts the stored row $a_m$ against
+$\U_m\bar{a}_k$, matching $\w_m\herm\U_m\w_k$, while \verb|denom| contracts the
+pivot row, matching $\w_k\herm\U_m\w_k$. The two use the same intermediate.
+
+\subsection{The core loop}
+
+The online ISS update, with commentary:
+
+\begin{lstlisting}
+for t in range(n_frames):
+    x_t = X[t]                                   # (n_freq, n_chan)
+    xxH = x_t[:, :, None] * np.conj(x_t[:, None, :])
+
+    U_prev = U.copy()          # snapshot: the recursion anchors here
+
+    for _ in range(n_iter):
+        for k in range(n_src):
+            w_k = W[:, k, :]
+            y_k = np.sum(w_k * x_t, axis=-1)
+            r_k = np.sqrt(np.sum(np.abs(y_k) ** 2))
+            phi_k = _phi(r_k, model, n_freq, eps)
+
+            U[k] = alpha * U_prev[k] + (1 - alpha) * phi_k * xxH
+
+            w_k_frozen = w_k.copy()              # pivot must not move
+            # ... compute v as above ...
+            W -= v_t[:, :, None] * w_k_frozen[:, None, :]
+
+    Y_out[t] = (W @ x_t[:, :, None])[..., 0]
+\end{lstlisting}
+
+Three points. The snapshot \verb|U_prev| implements the anchoring discussed
+above. The pivot row is copied before the update because the rank-1 subtraction
+modifies every row of $\W$, including the pivot itself, and all $v_m$ must be
+computed against the pre-update pivot. Finally, the frequency axis is fully
+vectorised while the frame, sweep, and source loops remain in Python; with
+$F = 513$ bins the interpreter overhead is negligible, since only
+$N_{\text{iter}}\times K$ Python iterations occur per frame.
+
+\subsection{What is and is not vectorised}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lll}
+\toprule
+Axis & Treatment & Reason \\
+\midrule
+Frames & Python loop & Sequential by definition; the point of the algorithm \\
+Sweeps & Python loop & Each refines the previous \\
+Sources & Python loop & Gauss-Seidel; source $k+1$ needs $k$'s result \\
+Frequency & Vectorised & Independent across bins \\
+Channels & Batched BLAS & Small dense operations \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The channel-axis operations are written as batched \verb|matmul| rather than
+\verb|einsum|. This is not cosmetic: \verb|einsum| does not dispatch to BLAS,
+and since the IP baseline uses \verb|np.linalg.solve| and \verb|@| which do, an
+\verb|einsum|-based ISS would have compared implementation styles rather than
+algorithms. Before this was corrected, ISS appeared \emph{slower} than IP above
+eight channels, which was an artefact.
+
+\subsection{Projection back}
+
+Blind separation recovers each source only up to an unknown complex gain
+\emph{per frequency bin}. Left unresolved the output is spectrally distorted:
+it sounds filtered, regardless of how well the sources were actually separated.
+Projection back fits, by least squares, one complex coefficient per bin and per
+source against a reference microphone:
+%
+\begin{equation}
+c_{fk} = \frac{\sum_n x_{f n}^{(0)*} y_{fnk}}{\sum_n |y_{fnk}|^2},
+\qquad
+y_{fnk} \leftarrow \bar{c}_{fk}\, y_{fnk}.
+\end{equation}
+%
+For $F = 513$ and $K = 2$ this is $1026$ coefficients, not a single gain. It is
+a filter, not a volume control. Verified against a brute-force optimal scalar to
+$5\times10^{-16}$.
+
+Its effect is large. With projection back disabled, SDR measured
+$-17.65$~dB while SIR \emph{improved} to $28.29$~dB: the separation was working,
+but each bin carried an arbitrary gain.
+
+%======================================================================
+\section{Verification}
+
+Correctness was established by three independent means rather than inspection.
+
+\paragraph{Brute-force cross-check.} Both algorithms were reimplemented a second
+time using fully explicit scalar loops, written directly from the pseudocode and
+sharing no code with the vectorised versions. Agreement across both source
+models and two iteration counts:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llcc}
+\toprule
+Model & $N_{\text{iter}}$ & ISS $\max|\text{vec}-\text{brute}|$ & IP $\max|\text{vec}-\text{brute}|$ \\
+\midrule
+Laplace & 1 & $3.6\times10^{-14}$ & $2.5\times10^{-14}$ \\
+Laplace & 3 & $2.1\times10^{-14}$ & $2.6\times10^{-14}$ \\
+Gauss   & 1 & $9.2\times10^{-14}$ & $1.4\times10^{-13}$ \\
+Gauss   & 3 & $1.0\times10^{-11}$ & $8.3\times10^{-14}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Functional test with known ground truth.} On a synthetic mixture whose
+sources follow the IVA dependency model and whose mixing matrix is known, the
+normalised Amari distance was measured, where $0$ is perfect separation:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lc}
+\toprule
+Method & Amari distance \\
+\midrule
+Unseparated input & $0.5318$ \\
+Batch ISS & $0.0023$ \\
+Batch IP & $0.0023$ \\
+Online ISS & $0.0085$ \\
+Online IP & $0.0085$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Batch outperforming online is expected, since it sees the whole recording
+repeatedly. ISS and IP landing on identical values is the signature of two
+methods minimising the same cost.
+
+\paragraph{End-to-end reproduction.} The repository was cloned into a clean
+virtual environment with current library versions and every script rerun, to
+confirm the results do not depend on the development machine's state.
+
+%======================================================================
+\section{Defects found, and what each cost}
+\label{sec:pitfalls}
+
+Each of the following changed reported numbers. They are recorded because each
+is easy to reintroduce.
+
+\paragraph{1. Covariance recursion anchored to the wrong value.} The recursion
+was applied to the running iterate rather than the previous frame, giving an
+effective forgetting factor of $\alpha^{N_{\text{iter}}}$ and injecting the
+frame's $\x\x\herm$ once per sweep instead of once per frame. Cost: about
+$1.5$~dB of SDR. Symptom: none, it simply separated worse.
+
+\paragraph{2. Signal-to-noise ratio off by 12~dB.} The noise level was set with
+\verb|10 ** (-snr / 10)| used as an \emph{amplitude} scale, mixing the power and
+amplitude conventions. A nominal $15$~dB SNR was in fact producing $27$~dB. Every
+score measured before this fix was taken in a far cleaner room than claimed.
+The corrected form derives the noise from the measured signal level using
+\verb|10 ** (-snr / 20)|, verified at $15.04$~dB. This error was inherited from
+the upstream reference code and is still present there.
+
+\paragraph{3. Conjugate on the wrong side of the Hermitian form.} Discussed in
+Section~\ref{sec:conventions}. Produces plausible real numbers, so it must be
+caught numerically.
+
+\paragraph{4. \texttt{einsum} versus BLAS.} Discussed in
+Section~\ref{sec:conventions}. Before correction, the runtime comparison
+measured implementation style and inverted the conclusion above eight channels.
+
+\paragraph{5. A 10~MB temporary in batch ISS.} The natural way to write the
+numerator of~\eqref{eq:issefficient},
+\begin{lstlisting}
+v_num = (Y * r_inv[None, :, :]) @ np.conj(Y[:, s, :, None])
+\end{lstlisting}
+materialises a full $(F, K, N)$ temporary on \emph{every pivot}, about $10$~MB at
+twelve channels. Batch ISS has low arithmetic intensity and is bandwidth-bound,
+so the memory traffic dominates. Measured $2.5\times$ slower than the fused
+alternative,
+\begin{lstlisting}
+v_num = np.einsum("fmt,mt,ft->fm", Y, r_inv, np.conj(Y[:, s, :]), optimize=True)
+\end{lstlisting}
+With the naive form the batch curve \emph{fell} to $0.71\times$ at sixteen
+channels, inverting the paper's result entirely. Note the irony against
+point~4: here \verb|einsum| is faster, because avoiding the temporary matters
+more than reaching BLAS.
+
+\paragraph{6. Benchmark workload too small to time.} At low channel counts a
+batch sweep completes in a few milliseconds. With an insufficient workload the
+benchmark produced a spurious $3.03\times$ spike at sixteen channels that
+vanished once the number of sweeps and trials was raised.
+
+%======================================================================
+\section{Behavioural findings}
+
+\subsection{Scale drift during silence}
+
+During silence nothing is added to $\U$, so it decays geometrically as
+$\alpha^{t}$. The self-normalisation term $1 - (\w_k\herm\U_k\w_k)^{-1/2}$
+responds by inflating $\w_k$ to keep the quadratic form near unity, so the
+demixing matrix grows roughly as $\alpha^{-t/2}$. Measured on a synthetic
+mixture with a silent gap inserted:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{cccc}
+\toprule
+Silent frames & $\W$ scale & Amari, first 30 frames after & Amari, 300 frames later \\
+\midrule
+0 & 4.85 & 0.0146 & 0.0140 \\
+50 & 7.10 & 0.0241 & 0.0106 \\
+300 & 29.67 & 0.1203 & 0.0213 \\
+1000 & 96.65 & 0.1604 & 0.0142 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Separation immediately after a long pause degrades by an order of magnitude,
+though it recovers within a few hundred frames. Nothing diverges: the $\epsilon$
+floor in the denominator is load-bearing here, not cosmetic. Freezing the
+covariance update on silent frames would prevent the decay that drives this, and
+the per-source $r_{kt}$ already provides a natural activity signal. This is the
+same mechanism as the paper's ``flexible'' update, reached from a different
+direction.
+
+\subsection{Projection back over long recordings}
+
+Because the demixing matrix keeps adapting, the output scale drifts, and a
+single coefficient fitted across a long file suits neither end. On two-minute
+material:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+Projection back fitted & SDR (dB) & SIR (dB) \\
+\midrule
+Once over 120~s & $-3.45$ / $-2.13$ & 16.01 / 22.09 \\
+Every 10~s & 0.23 / 1.02 & 14.64 / 17.54 \\
+Every 2~s & 2.22 / 2.21 & 13.34 / 13.40 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Segmenting recovers about $5.7$~dB of SDR, trading some SIR. Note that this
+makes the reported figure slightly optimistic relative to a true streaming
+system, which could not inspect a whole segment before choosing its scale.
+
+\subsection{Block size}
+\label{sec:blocksize}
+
+Shorter blocks reduce latency but weaken the narrowband approximation of
+Section~1, since the window must be long relative to the room impulse response.
+At $15$~dB SNR with $T_{60}\approx300$~ms:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{cccccc}
+\toprule
+Block & Hop & Window & Blocks & SDR (dB) & SIR (dB) \\
+\midrule
+1024 & 512 & 64~ms & 551 & 0.42 & 15.36 \\
+2048 & 1024 & 128~ms & 276 & 2.27 & 15.24 \\
+4096 & 2048 & 256~ms & 138 & 2.98 & 14.95 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+SIR barely moves while SDR varies by $2.5$~dB. The short window separates about
+as well; it \emph{reconstructs} worse, which is the time-domain aliasing that
+appears once the effective filter no longer fits inside the window.
+
+%======================================================================
+\section{Complexity, and why batch and online differ}
+\label{sec:complexity}
+
+\subsection{The offline argument}
+\label{sec:whyonlinediffers}
+
+Per iteration and per frequency bin, IP builds an $M\times M$ covariance,
+$O(M^2N)$, and solves, $O(M^3)$, repeated for $M$ rows:
+%
+\begin{equation}
+\mathcal{C}_{\text{IP}} = O\!\left(F M^3 \max(M, N)\right).
+\end{equation}
+%
+ISS computes~\eqref{eq:issefficient} for all $m,k$, each requiring $O(N)$
+operations, and never forms a matrix:
+%
+\begin{equation}
+\mathcal{C}_{\text{ISS}} = O\!\left(F M^2 N\right).
+\end{equation}
+%
+The ratio grows with $M$, hence the widening gap offline.
+
+\subsection{Why it does not transfer}
+
+Online, \eqref{eq:issefficient} is unavailable. Those expressions are sums over
+$N$ frames of already-separated outputs; with a single frame there is nothing to
+sum, and rank-1 statistics from one frame are useless. The recursion
+\eqref{eq:recursion} therefore keeps $M\times M$ covariances in the
+\emph{input} domain, and recovering the same quantities requires
+$\U_m\w_k$ for every $m$ at every pivot: $K$ matrix-vector products of
+$O(M^2)$, so $O(M^3)$ per pivot and $O(M^4)$ per sweep. IP is likewise $O(M^4)$.
+Both land at the same order, and only the constant differs.
+
+Equivalently: batch ISS avoids matrices by working in the output domain, but
+online separation of the incoming frame requires $\W_{ft}$ explicitly, and the
+output-domain formulation never forms it.
+
+Note that the original paper remarks that with $N = 1$ ISS is merely quadratic in
+$M$ while IP can be brought to cubic via Sherman-Morrison. That analysis assumes
+working directly from the current frame's outputs. The recursive algorithm
+considered here does not, so the two statements describe different computations.
+
+\subsection{Measurements}
+
+Synthetic data, $F = 129$, $N = 400$, best of five trials, batch running $40$
+sweeps and online $2$ per frame:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ccc}
+\toprule
+Channels & Batch ISS speedup & Online ISS speedup \\
+\midrule
+2 & $0.83\times$ & $1.34\times$ \\
+4 & $0.82\times$ & $1.28\times$ \\
+6 & $1.18\times$ & $1.24\times$ \\
+8 & $1.12\times$ & $1.19\times$ \\
+10 & $1.29\times$ & $1.14\times$ \\
+12 & $1.29\times$ & $1.07\times$ \\
+14 & $3.11\times$ & $1.01\times$ \\
+16 & $2.68\times$ & $0.85\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The curves move in opposite directions. At two channels ISS is offline
+\emph{slower}, since a $2\times2$ solve is trivial and ISS's overhead dominates.
+
+For comparison, Figure~3 of the paper reports roughly $1.4\times$ at twelve
+channels rising to about $1.8\times$ at seventeen, from a multicore C\texttt{++}
+implementation. Agreement at twelve channels is close. The shape reproduces;
+individual points at fourteen and sixteen are noisy in this measurement, batch
+ISS having measured marginally faster at sixteen than at fourteen, which is not
+physical. The paper likewise notes its own measured gap falls short of the
+complexity prediction, attributing this to a larger hidden constant in ISS and to
+memory access patterns.
+
+%======================================================================
+\section{Results on speech}
+
+Two-speaker reverberant mixtures, $15$~dB SNR, $1024$-sample blocks.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccccc}
+\toprule
+Material & Algorithm & SDR (dB) & SIR (dB) & ms/block & Realtime factor \\
+\midrule
+$4.4$~s clips & ISS & 0.59 / 0.25 & 12.94 / 17.79 & 0.70 & 0.022 \\
+$4.4$~s clips & IP & 0.59 / 0.25 & 13.09 / 17.77 & 1.13 & 0.035 \\
+$120$~s recordings & ISS & 2.22 / 2.21 & 13.34 / 13.40 & 0.75 & 0.023 \\
+$120$~s recordings & IP & 2.23 / 2.25 & 13.34 / 13.77 & 1.17 & 0.037 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Three observations. The two algorithms agree to within $0.04$~dB throughout, as
+they must. Per-block cost is flat between $551$ and $3767$ blocks, confirming
+the method is genuinely online: cost does not grow with how much audio has
+already been processed. And a realtime factor near $0.02$ leaves roughly
+$45\times$ headroom, though in pure Python on a desktop CPU with only two
+channels, which is the easy case.
+
+%======================================================================
+\section{Limitations}
+\label{sec:limitations}
+
+\begin{itemize}
+\item \textbf{The flexible update is not implemented.} Every source is updated on
+every sweep. Restricting updates to moving sources is where the larger online
+saving is expected, and Section~7.1 suggests the same mechanism would address
+the silence problem.
+\item \textbf{Projection back is not causal.} The batch form reads future frames.
+Segmenting mitigates but does not eliminate this; a true streaming system needs
+a recursive scale estimate.
+\item \textbf{Determined case only.} Microphones must equal sources.
+\item \textbf{Pure Python.} A compiled or embedded target would shift every
+constant reported here, and the realtime headroom in particular should not be
+extrapolated to a phone or DSP.
+\end{itemize}
+
+%======================================================================
+\section{Repository contents}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+File & Purpose \\
+\midrule
+\texttt{online\_iva/auxiva\_iss\_online.py} & Online ISS \\
+\texttt{online\_iva/auxiva\_ip\_online.py} & Online IP baseline \\
+\texttt{online\_iva/batch\_reference.py} & Batch ISS and IP \\
+\texttt{online\_iva/projection\_back.py} & Scale resolution \\
+\texttt{online\_iva/metrics.py} & SDR/SIR evaluation \\
+\texttt{verify\_online.py} & Brute-force cross-check and Amari test \\
+\texttt{demo\_audio.py} & Speech demo, \texttt{-{}-long} for 2-minute material \\
+\texttt{demo\_blocksize.py} & Block-size study \\
+\texttt{benchmark\_runtime.py} & Online ISS versus IP scaling \\
+\texttt{benchmark\_batch\_vs\_online.py} & All four, 2 to 16 channels \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\vspace{1em}
+\noindent
+Source: \url{https://github.com/Joels1994/online-auxiva-iss}
+
+\vspace{0.6em}
+\noindent
+\textbf{Attribution.} \texttt{projection\_back.py}, \texttt{metrics.py} and the
+batch implementations derive from \texttt{piva} by Robin Scheibler (GPL-3.0).
+Speech is from the CMU ARCTIC corpus. The batch algorithms are due to Ono and to
+Scheibler and Ono; the online ISS formulation to Nakashima and Ono.
+
+\end{document}
