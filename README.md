@@ -278,3 +278,36 @@ unseparated input. Both landing on the same figure is expected, since
 they minimize the same cost function.
 
 Run with `python verify_online.py`.
+
+## Batch vs online runtime
+
+```bash
+python benchmark_batch_vs_online.py            # full sweep, 2 to 16 channels
+python benchmark_batch_vs_online.py --quick    # fast smoke test
+python benchmark_batch_vs_online.py --plot     # also write the figure
+```
+
+Compares all four combinations, batch and online times ISS and IP, on
+synthetic data. Answers why the ISS advantage grows with channel count
+offline but decays online.
+
+| Channels | Batch ISS speedup | Online ISS speedup |
+| --- | --- | --- |
+| 2 | 0.83x | 1.34x |
+| 6 | 1.18x | 1.24x |
+| 10 | 1.29x | 1.14x |
+| 12 | 1.29x | 1.07x |
+| 16 | 2.68x | 0.85x |
+
+Batch ISS contracts over time and never forms a covariance matrix, so it
+grows one order more slowly in the channel count than batch IP. Online,
+that is impossible: a single frame gives nothing to sum over, so both
+methods carry M-by-M covariances and land at the same order, leaving ISS
+only a shrinking constant-factor edge.
+
+For reference, Figure 3 of the paper reports about 1.4x at 12 channels
+rising to 1.8x at 17, from a multicore C++ implementation. The shape
+agrees; the magnitudes at the top of the range are noisy in both.
+
+The same study, with plots, is in
+`online_iva_ipynb/batch_vs_online_runtime.ipynb`.
