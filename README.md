@@ -177,6 +177,26 @@ factor of `alpha ** n_iter` and injects the frame's `x x^H` once per
 sweep. Getting this wrong is silent: it still separates, just worse. It
 cost about 1.5 dB of SDR here before being corrected.
 
+## Install and run on a fresh machine
+
+```bash
+git clone https://github.com/Joels1994/online-auxiva-iss.git
+cd online-auxiva-iss
+pip install numpy scipy pyroomacoustics
+
+python benchmark_runtime.py   # runtime comparison, numpy only
+python demo_audio.py          # separates speech, writes output_audio/
+```
+
+No build step and no compiled extension. `demo_audio.py` downloads its
+two speech samples on first run, so that one needs network access;
+nothing else does.
+
+Verified working on two combinations: numpy 1.24 with pyroomacoustics
+0.10, and numpy 1.23 with pyroomacoustics 0.1.23. The STFT helpers
+moved between those pyroomacoustics releases, so the demo detects
+their location at import.
+
 ## Requirements
 
 NumPy, and SciPy for the SDR/SIR metrics in `online_iva/metrics.py`.

@@ -32,6 +32,20 @@ from scipy.io import wavfile
 
 from online_iva import auxiva_iss_online, auxiva_ip_online, metrics
 
+# pyroomacoustics moved the STFT helpers from pra.transform into the
+# pra.transform.stft submodule after the 0.1.x series. Support both so
+# this runs on an old pinned install and on a current one alike.
+try:
+    from pyroomacoustics.transform.stft import (
+        analysis as stft_analysis,
+        synthesis as stft_synthesis,
+        compute_synthesis_window,
+    )
+except (ImportError, AttributeError):  # pragma: no cover - old versions
+    stft_analysis = pra.transform.analysis
+    stft_synthesis = pra.transform.synthesis
+    compute_synthesis_window = pra.transform.compute_synthesis_window
+
 SAMPLE_URL = (
     "https://github.com/LCAV/pyroomacoustics/raw/master/examples/input_samples"
 )
@@ -101,7 +115,7 @@ def main():
     framesize, n_src, n_mics = 4096, 2, 2
     hop = framesize // 2
     win_a = np.hamming(framesize)
-    win_s = pra.transform.compute_synthesis_window(win_a, hop)
+    win_s = compute_synthesis_window(win_a, hop)
 
     np.random.seed(0)
     source_signals = [s[1] for s in get_samples()]
@@ -118,7 +132,7 @@ def main():
     mix = np.sum(premix, axis=0) + sigma_n * np.random.randn(*premix.shape[1:])
 
     one_pass_len = mix.shape[1]
-    X = pra.transform.analysis(
+    X = stft_analysis(
         np.tile(mix, (1, N_REPEAT_SIGNAL)).T, framesize, hop, win=win_a
     ).astype(np.complex128)
 
@@ -139,7 +153,7 @@ def main():
     ]:
         Y = fn(X, n_src=n_src, n_iter=3, alpha=0.96, model="laplace", proj_back=True)
 
-        y = pra.transform.synthesis(Y, framesize, hop, win=win_s)
+        y = stft_synthesis(Y, framesize, hop, win=win_s)
         y = y[framesize - hop:, :].astype(np.float64)
 
         m = min(y.shape[0] - eval_start, premix.shape[2])
