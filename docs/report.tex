@@ -692,6 +692,71 @@ physical. The paper likewise notes its own measured gap falls short of the
 complexity prediction, attributing this to a larger hidden constant in ISS and to
 memory access patterns.
 
+
+%======================================================================
+\section{Making the comparison fair}
+\label{sec:fairness}
+
+A timing comparison is only meaningful if the two modules differ solely in the
+update rule. Four changes were made to enforce this, and one proposed change was
+rejected on evidence.
+
+\paragraph{Power-matched prior.} Both modules initialised their covariance to
+$0.01\,\boldsymbol{I}$, which is arbitrary relative to the signal level. Both now
+use $\bar{p}\,\boldsymbol{I}$ with $\bar{p}$ the mean input power over the first
+fifty frames, so the initial condition behaves identically at any input gain.
+This improved separation on speech by roughly $0.5$~dB.
+
+\paragraph{Two-pass sweep.} Previously each source refreshed its own $r_k$ and
+$\U_k$ as its turn arrived, so source $m$'s covariance was current if $m$ had
+already been visited in that sweep and stale otherwise, making results depend on
+source indexing. Both modules now refresh all statistics in a first pass, then
+sweep the pivots in a second. This matches the batch Algorithm~1, which computes
+the activations once per iteration and notes that this suffices. Agreement with
+the brute-force reimplementation improved from $10^{-14}$ to $10^{-15}$.
+
+\paragraph{Pass one is byte-identical between the modules.} Verified textually,
+not by eye: the two blocks differ only in the covariance variable's name.
+
+\paragraph{A NumPy 2.0 incompatibility in the IP solve.} The right-hand side was
+passed with shape $(F, M)$, which NumPy~1.x interprets as a stack of vectors.
+NumPy~2.0 changed that rule and raises \texttt{ValueError} unless $F = M$.
+Confirmed by running under both versions. The trailing axis is now explicit, and
+both modules were verified to run under NumPy 2.0.2 as well as 1.23.
+
+\paragraph{Rejected: a warm-up gate on the ISS pivot rescaling.} It was proposed
+to disable ISS's self-normalisation for the first $3/(1-\alpha)$ frames. This
+was tested rather than assumed:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\toprule
+& Amari, frames 0--200 & frames 200--600 & steady state \\
+\midrule
+ISS without gate & 0.3959 & 0.0465 & 0.0085 \\
+ISS with gate & 0.4259 & 0.0476 & 0.0085 \\
+IP (no counterpart exists) & 0.4005 & 0.0473 & 0.0085 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The gate makes the early window slightly \emph{worse} and changes nothing
+afterwards. More importantly, IP's normalisation is not optional, so no
+equivalent gate exists for it: adding one to ISS alone would introduce an
+asymmetry rather than remove one. The measured transient is already symmetric,
+$0.3959$ against $0.4005$, so there is nothing to correct. With the
+power-matched prior in place the gate addresses a problem that no longer exists.
+
+\paragraph{What fairness does not buy.} These changes make the \emph{implementations}
+comparable. They do not change the fact, established in
+Section~\ref{sec:complexity}, that both online rules are $O(M^4)$ per sweep, so
+any measured speedup reflects BLAS-3 matrix multiplication outperforming
+LAPACK's batched solve rather than the inverse-free advantage the ISS literature
+reports. Captioning such a plot as demonstrating that advantage would be wrong.
+The honest framing is the one used throughout this report: the online
+reformulation narrows the gap between IP and ISS relative to the batch case.
+
 %======================================================================
 \section{Results on speech}
 

@@ -125,11 +125,19 @@ def auxiva_iss_online(
         if W0 is None
         else W0.copy()
     )
-    U = (
-        np.tile(0.01 * np.eye(n_chan, dtype=X.dtype), (n_src, n_freq, 1, 1))
-        if U0 is None
-        else U0.copy()
-    )
+    # Power-matched prior. A fixed 0.01 * I is arbitrary relative to the
+    # signal level: too large it dominates for many frames, too small it
+    # leaves the first denominators near zero. Scaling by the observed
+    # input power makes the initial condition behave the same way at any
+    # input gain. The IP baseline uses an identical prior so the two
+    # start from the same place.
+    if U0 is None:
+        p0 = np.mean(np.abs(X[: min(n_frames, 50)]) ** 2)
+        U = np.tile(
+            (p0 + eps) * np.eye(n_chan, dtype=X.dtype), (n_src, n_freq, 1, 1)
+        )
+    else:
+        U = U0.copy()
 
     Y_out = np.zeros((n_frames, n_freq, n_src), dtype=X.dtype)
 
@@ -150,22 +158,30 @@ def auxiva_iss_online(
         U_prev = U.copy()
 
         for _ in range(n_iter):
+
+            # ---- pass 1: refresh every r_k and U[k] from the current W
+            #
+            # All sources' statistics are refreshed together, before any
+            # pivot moves, rather than each source refreshing its own as
+            # its turn arrives. Two reasons. It matches the batch
+            # Algorithm 1, which computes the activations once per
+            # iteration and notes that this suffices. And it removes an
+            # ordering dependence: previously source m's covariance was
+            # current if m had already been visited this sweep and stale
+            # otherwise, so results depended on source indexing. The IP
+            # baseline performs the identical pass, so the two differ
+            # only in the update rule below.
+            Y_all = (W @ x_t[:, :, None])[..., 0]                # (n_freq, n_src)
+            r_all = np.sqrt(np.sum(np.abs(Y_all) ** 2, axis=0))  # (n_src,)
+            phi_all = np.array(
+                [_phi(r, model, n_freq, eps) for r in r_all]
+            )
+
+            U = alpha * U_prev + (1 - alpha) * phi_all[:, None, None, None] * xxH[None]
+
+            # ---- pass 2: pivot sweep
             for k in range(n_src):
 
-                # --- auxiliary variable and recursive covariance for
-                # --- the current pivot source k, using the freshest W
-                w_k = W[:, k, :]  # (n_freq, n_chan), current pivot row
-                y_k = np.sum(w_k * x_t, axis=-1)  # w_k^H x_f for every f
-                r_k = np.sqrt(np.sum(np.abs(y_k) ** 2))
-                phi_k = _phi(r_k, model, n_freq, eps)
-
-                U[k] = alpha * U_prev[k] + (1 - alpha) * phi_k * xxH
-
-                # --- ISS row update: refresh every row of W relative
-                # --- to pivot k, using each source's own (possibly
-                # --- still-stale, if not yet reached this sweep)
-                # --- covariance estimate, exactly as in Algorithm 1
-                #
                 # Note on conjugates: W's rows are stored so that
                 # y = W @ x directly (no extra conjugate needed at use
                 # time, matching the final y_t computation below), which
@@ -175,7 +191,7 @@ def auxiva_iss_online(
                 # as W[:,m,:] @ (U @ conj(W[:,k,:])) -- U applied to the
                 # conjugated pivot row, then dotted with the plain
                 # (unconjugated) row -- not the other way around.
-                w_k_frozen = w_k.copy()
+                w_k_frozen = W[:, k, :].copy()
 
                 # U[m] @ conj(w_k) for every source m, shape
                 # (n_src, n_freq, n_chan). Written as a batched matmul

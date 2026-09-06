@@ -76,11 +76,15 @@ def auxiva_ip_online(
         if W0 is None
         else W0.copy()
     )
-    V = (
-        np.tile(0.01 * np.eye(n_chan, dtype=X.dtype), (n_src, n_freq, 1, 1))
-        if V0 is None
-        else V0.copy()
-    )
+    # Power-matched prior, identical to the ISS module's, so the two
+    # start from the same place. See the comment there.
+    if V0 is None:
+        p0 = np.mean(np.abs(X[: min(n_frames, 50)]) ** 2)
+        V = np.tile(
+            (p0 + eps) * np.eye(n_chan, dtype=X.dtype), (n_src, n_freq, 1, 1)
+        )
+    else:
+        V = V0.copy()
 
     Y_out = np.zeros((n_frames, n_freq, n_src), dtype=X.dtype)
 
@@ -97,23 +101,31 @@ def auxiva_ip_online(
         V_prev = V.copy()
 
         for _ in range(n_iter):
+
+            # ---- pass 1: byte-identical to the ISS module's pass 1, so
+            # ---- the two modules differ only in the sweep below
+            Y_all = (W @ x_t[:, :, None])[..., 0]                # (n_freq, n_src)
+            r_all = np.sqrt(np.sum(np.abs(Y_all) ** 2, axis=0))  # (n_src,)
+            phi_all = np.array(
+                [_phi(r, model, n_freq, eps) for r in r_all]
+            )
+
+            V = alpha * V_prev + (1 - alpha) * phi_all[:, None, None, None] * xxH[None]
+
+            # ---- pass 2: IP sweep. This is the step ISS removes: a
+            # ---- linear solve per frequency bin.
             for k in range(n_src):
 
-                # --- auxiliary variable and recursive covariance for
-                # --- source k, identical to the ISS version
-                w_k = W[:, k, :]  # stored row k, i.e. w_k^H
-                y_k = np.sum(w_k * x_t, axis=-1)
-                r_k = np.sqrt(np.sum(np.abs(y_k) ** 2))
-                phi_k = _phi(r_k, model, n_freq, eps)
-
-                V[k] = alpha * V_prev[k] + (1 - alpha) * phi_k * xxH
-
-                # --- iterative projection update. This is the step
-                # --- ISS removes: a linear solve per frequency bin.
-                WV = W @ V[k]  # (n_freq, n_chan, n_chan), row m is w_m^H V_k
+                # Small diagonal loading keeps the solve well posed; the
+                # ISS side has the equivalent guard on its denominator.
+                WV = W @ V[k] + eps * eyes[None]
 
                 e_k = np.broadcast_to(eyes[:, k], (n_freq, n_chan))
-                w_new = np.linalg.solve(WV, e_k)  # (n_freq, n_chan), true steering vec
+                # The trailing axis is explicit: numpy 2.0 changed how a
+                # right-hand side of shape (n_freq, n_chan) is
+                # interpreted, and without it solve raises there while
+                # working on numpy 1.x.
+                w_new = np.linalg.solve(WV, e_k[..., None])[..., 0]
 
                 # normalize: w_k <- w_k / sqrt(w_k^H V_k w_k). w_new is
                 # the true (unconjugated) vector here, so this is the
