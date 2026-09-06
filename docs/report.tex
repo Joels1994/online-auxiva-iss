@@ -782,6 +782,59 @@ asymmetry rather than remove one. The measured transient is already symmetric,
 $0.3959$ against $0.4005$, so there is nothing to correct. With the
 power-matched prior in place the gate addresses a problem that no longer exists.
 
+
+\paragraph{Rejected: collapsing the rank-1 term to avoid materialising $\U$.}
+Since $\x\x\herm\overline{\w_k} = \x\,\overline{y_k}$, the new term of the
+recursion collapses and $\U$ need never be formed, carrying only $\U_{t-1}$.
+The identity is exact, verified to $2\times10^{-15}$, and the restructured code
+passed the brute-force check unchanged. It was nonetheless reverted, because it
+is slower precisely where it was expected to help. Interleaved best-of-nine
+timings, ISS only:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{cccc}
+\toprule
+Channels & Materialised $\U$ (ms/frame) & Collapsed (ms/frame) & Gain \\
+\midrule
+2 & 0.39 & 0.45 & $0.85\times$ \\
+3 & 0.84 & 0.96 & $0.88\times$ \\
+4 & 1.31 & 1.46 & $0.89\times$ \\
+6 & 3.70 & 3.94 & $0.94\times$ \\
+8 & 8.91 & 8.99 & $0.99\times$ \\
+12 & 32.84 & 31.54 & $1.04\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The premise was that allocation overhead dominates at small $M$. It does not.
+Both forms perform the same $K^2F$ matrix-vector products; the collapse trades
+one $(K,F,M,M)$ allocation per sweep for $K$ additional elementwise operations
+per sweep, and with $K = M$ those are the same order. What remains is extra
+interpreter and temporary-allocation overhead per pivot, which costs more than
+the saved array precisely at the small channel counts where ISS holds its
+advantage. It only breaks even at eight channels and is marginally ahead at
+twelve.
+
+\paragraph{Applied: distributive diagonal loading in IP.} The loaded matrix is no
+longer materialised, using $\W(\V_k + \rho\boldsymbol{I}) = \W\V_k + \rho\W$ and
+likewise for the normalisation. It was \emph{not} folded into pass one, which
+would be simpler: the snapshot $\V_{t-1}$ would then inherit the loading each
+frame and compound it to $\rho/(1-\alpha)$, a $25\times$ inflation at
+$\alpha = 0.96$, confirmed by simulating the recursion.
+
+\paragraph{Applied: the loading scale follows a supplied prior.} When the caller
+passes $\V_0$ it may sit at a different scale than the input-derived value, so
+$\rho$ is now measured from the supplied matrix's mean diagonal rather than
+assumed.
+
+\paragraph{On the remaining asymmetry.} IP carries diagonal loading and ISS does
+not. This is deliberate and is not an unfair advantage handed to ISS: a singular
+solve fails hard, whereas ISS degrades gracefully through the floor on its
+scalar denominator. Removing the loading would not equalise the comparison, it
+would make IP crash on quiet input. The module header now says this rather than
+claiming outright parity.
+
 \paragraph{What fairness does not buy.} These changes make the \emph{implementations}
 comparable. They do not change the fact, established in
 Section~\ref{sec:complexity}, that both online rules are $O(M^4)$ per sweep, so

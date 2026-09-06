@@ -2,17 +2,21 @@
 #  analysis with iterative projection (AuxIVA-IP).
 #
 #  This is the inversion-based baseline that online AuxIVA-ISS
-#  (auxiva_iss_online.py) is meant to replace. It is written to be
-#  structurally identical to that module -- same recursive weighted
-#  covariance, same auxiliary variable, same per-frame iteration
-#  scheme -- so that the only thing differing between the two is the
-#  demixing-vector update rule itself:
+#  (auxiva_iss_online.py) is meant to replace. It is written to match
+#  that module as closely as the two rules allow -- same recursive
+#  weighted covariance, same auxiliary variable, same per-frame
+#  iteration scheme -- so a runtime comparison tests the update rule
+#  rather than implementation style:
 #
 #    IP  : solve (W V_k) w_k = e_k, then normalize     (needs a solve)
 #    ISS : rank-1 steering update                      (inverse-free)
 #
-#  That makes a runtime comparison between them a fair test of the
-#  update rule rather than of implementation style.
+#  One asymmetry remains and is deliberate. IP carries diagonal loading;
+#  ISS carries none. That is not an unfair advantage handed to ISS but a
+#  real cost of the inversion-based approach: a singular solve fails
+#  hard, where ISS degrades gracefully through the floor on its scalar
+#  denominator. Removing the loading would not equalize the comparison,
+#  it would just make IP crash on quiet input.
 #
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -80,26 +84,30 @@ def auxiva_ip_online(
     # Scale-matched prior, computed identically to the ISS module's.
     # See the comment there for why the input power alone is the wrong
     # scale. Change one, change both.
-    Xw = X[: min(n_frames, 50)]
-    p0 = np.mean(np.abs(Xw) ** 2)                 # mean per-bin power
-    e0 = np.mean(np.sum(np.abs(Xw) ** 2, axis=1))  # mean across-frequency energy
-    if model == "laplace":
-        u0 = p0 / (2.0 * np.sqrt(e0) + eps)        # phi ~ 1 / (2r)
-    else:
-        u0 = n_freq * p0 / (e0 + eps)              # phi ~ n_freq / r^2
-
-    # Diagonal loading for the solve, scaled to the data. An absolute
-    # constant does not track the input gain and would not prevent a
-    # LinAlgError on a quiet stretch, which in a streaming run is fatal
-    # where ISS merely degrades through its denominator floor.
-    reg = 1e-6 * u0
-
+    #
+    # The diagonal loading below is scaled to whichever covariance is
+    # actually in use: an absolute constant does not track the input
+    # gain and would not prevent a LinAlgError on a quiet stretch, which
+    # in a streaming run is fatal. A caller-supplied V0 may sit at a
+    # different scale than the input-derived prior, so it is measured
+    # rather than assumed.
     if V0 is None:
+        Xw = X[: min(n_frames, 50)]
+        p0 = np.mean(np.abs(Xw) ** 2)                 # mean per-bin power
+        e0 = np.mean(np.sum(np.abs(Xw) ** 2, axis=1))  # across-frequency energy
+        if model == "laplace":
+            u0 = p0 / (2.0 * np.sqrt(e0) + eps)        # phi ~ 1 / (2r)
+        else:
+            u0 = n_freq * p0 / (e0 + eps)              # phi ~ n_freq / r^2
         V = np.tile(
             (u0 + eps) * np.eye(n_chan, dtype=X.dtype), (n_src, n_freq, 1, 1)
         )
+        reg = 1e-6 * u0
     else:
         V = V0.copy()
+        reg = 1e-6 * np.mean(
+            np.real(np.diagonal(V, axis1=-2, axis2=-1))
+        )
 
     Y_out = np.zeros((n_frames, n_freq, n_src), dtype=X.dtype)
 
@@ -129,13 +137,17 @@ def auxiva_ip_online(
             # ---- linear solve per frequency bin.
             for k in range(n_src):
 
-                # Load V[k] itself, which is Hermitian positive
-                # semi-definite, rather than the product W @ V[k], which
-                # is neither: adding to the latter is not regularization
-                # in the usual sense. The same loaded matrix is then used
-                # for the normalization, so the two stay consistent.
-                Vk = V[k] + reg * eyes[None]
-                WV = W @ Vk
+                # The loading belongs on V[k], which is Hermitian
+                # positive semi-definite, not on the product W @ V[k],
+                # which is neither. Applied distributively so the loaded
+                # matrix is never materialized:
+                #     W @ (V[k] + reg I) = W @ V[k] + reg W
+                #
+                # Not folded into pass 1: V_prev would then inherit the
+                # loading each frame and it would compound to
+                # reg / (1 - alpha), a 25x inflation at alpha = 0.96.
+                WV = W @ V[k]
+                WV += reg * W
 
                 e_k = np.broadcast_to(eyes[:, k], (n_freq, n_chan))
                 # The trailing axis is explicit: numpy 2.0 changed how a
@@ -147,7 +159,9 @@ def auxiva_ip_online(
                 # normalize: w_k <- w_k / sqrt(w_k^H V_k w_k). w_new is
                 # the true (unconjugated) vector here, so this is the
                 # plain Hermitian form.
-                Vw = (Vk @ w_new[:, :, None])[..., 0]
+                # likewise (V[k] + reg I) @ w = V[k] @ w + reg w, so the
+                # normalization uses the same loaded matrix as the solve
+                Vw = (V[k] @ w_new[:, :, None])[..., 0] + reg * w_new
                 denom = np.real(np.sum(np.conj(w_new) * Vw, axis=-1))
                 denom = np.maximum(denom, eps)
                 w_new = w_new / np.sqrt(denom)[:, None]

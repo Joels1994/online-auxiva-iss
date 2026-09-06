@@ -134,15 +134,14 @@ def auxiva_iss_online(
     # on one test signal); the expression below lands within 1%.
     #
     # The IP baseline computes this identically. Change one, change both.
-    Xw = X[: min(n_frames, 50)]
-    p0 = np.mean(np.abs(Xw) ** 2)                 # mean per-bin power
-    e0 = np.mean(np.sum(np.abs(Xw) ** 2, axis=1))  # mean across-frequency energy
-    if model == "laplace":
-        u0 = p0 / (2.0 * np.sqrt(e0) + eps)        # phi ~ 1 / (2r)
-    else:
-        u0 = n_freq * p0 / (e0 + eps)              # phi ~ n_freq / r^2
-
     if U0 is None:
+        Xw = X[: min(n_frames, 50)]
+        p0 = np.mean(np.abs(Xw) ** 2)                 # mean per-bin power
+        e0 = np.mean(np.sum(np.abs(Xw) ** 2, axis=1))  # across-frequency energy
+        if model == "laplace":
+            u0 = p0 / (2.0 * np.sqrt(e0) + eps)        # phi ~ 1 / (2r)
+        else:
+            u0 = n_freq * p0 / (e0 + eps)              # phi ~ n_freq / r^2
         U = np.tile(
             (u0 + eps) * np.eye(n_chan, dtype=X.dtype), (n_src, n_freq, 1, 1)
         )
@@ -158,13 +157,10 @@ def auxiva_iss_online(
         # covariance gets refreshed this frame
         xxH = x_t[:, :, None] * np.conj(x_t[:, None, :])  # (n_freq, n_chan, n_chan)
 
-        # Snapshot of U_{t-1}. The recursion below must be anchored to
-        # the PREVIOUS frame's covariance, not to the running iterate:
-        # the point of the inner sweep is to recompute r_kt (and hence
-        # phi) as W improves, not to decay by alpha again or to inject
-        # this frame's x x^H once per sweep. Rebuilding from the
-        # snapshot keeps the effective forgetting factor at alpha per
-        # frame instead of alpha ** n_iter.
+        # Snapshot of U_{t-1}. The recursion is anchored there, not to
+        # the running iterate: the point of the inner sweep is to
+        # recompute r_kt (and hence phi) as W improves, not to decay by
+        # alpha again or to inject this frame's x x^H once per sweep.
         U_prev = U.copy()
 
         for _ in range(n_iter):
@@ -202,9 +198,21 @@ def auxiva_iss_online(
                 w_k_frozen = W[:, k, :].copy()
 
                 # U[m] @ conj(w_k) for every source m, shape
-                # (n_src, n_freq, n_chan). Written as a batched matmul
-                # rather than einsum so this goes through BLAS, matching
-                # how the IP baseline's linear algebra is dispatched.
+                # (n_src, n_freq, n_chan). A batched matmul, so this goes
+                # through BLAS, matching how the IP baseline's linear
+                # algebra is dispatched.
+                #
+                # This term can be computed without materializing U at
+                # all, since xxH @ conj(w_k) = x * conj(y_k) collapses the
+                # recursion's new term to a rank-1 product. That was
+                # tried and measured slower: both forms do the same
+                # number of matrix-vector products, and the collapse
+                # merely trades one (n_src, n_freq, n_chan, n_chan)
+                # allocation per sweep for n_src extra elementwise
+                # operations, which costs more at the small channel
+                # counts that matter here. Interleaved best-of-nine:
+                # 0.85x at 2 channels, 0.89x at 4, break-even at 8,
+                # 1.04x at 12.
                 Uk_wk = (U @ np.conj(w_k_frozen)[None, :, :, None])[..., 0]
 
                 denom = np.real(
