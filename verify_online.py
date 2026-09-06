@@ -21,11 +21,15 @@ def iss_bruteforce(X, n_iter, alpha, model="laplace", eps=1e-10):
     K = n_chan
     W = np.zeros((n_freq, n_chan, n_chan), dtype=complex)
     U = np.zeros((K, n_freq, n_chan, n_chan), dtype=complex)
-    p0 = np.mean(np.abs(X[: min(n_frames, 50)]) ** 2)
+    Xw = X[: min(n_frames, 50)]
+    p0 = np.mean(np.abs(Xw) ** 2)
+    e0 = np.mean(np.sum(np.abs(Xw) ** 2, axis=1))
+    u0 = (p0 / (2.0 * np.sqrt(e0) + eps)) if model == "laplace" \
+         else (n_freq * p0 / (e0 + eps))
     for f in range(n_freq):
         W[f] = np.eye(n_chan)
         for k in range(K):
-            U[k, f] = (p0 + eps) * np.eye(n_chan)
+            U[k, f] = (u0 + eps) * np.eye(n_chan)
 
     Y = np.zeros((n_frames, n_freq, K), dtype=complex)
 
@@ -101,11 +105,16 @@ def ip_bruteforce(X, n_iter, alpha, model="laplace", eps=1e-10):
     K = n_chan
     W = np.zeros((n_freq, n_chan, n_chan), dtype=complex)
     V = np.zeros((K, n_freq, n_chan, n_chan), dtype=complex)
-    p0 = np.mean(np.abs(X[: min(n_frames, 50)]) ** 2)
+    Xw = X[: min(n_frames, 50)]
+    p0 = np.mean(np.abs(Xw) ** 2)
+    e0 = np.mean(np.sum(np.abs(Xw) ** 2, axis=1))
+    u0 = (p0 / (2.0 * np.sqrt(e0) + eps)) if model == "laplace" \
+         else (n_freq * p0 / (e0 + eps))
+    reg = 1e-6 * u0
     for f in range(n_freq):
         W[f] = np.eye(n_chan)
         for k in range(K):
-            V[k, f] = (p0 + eps) * np.eye(n_chan)
+            V[k, f] = (u0 + eps) * np.eye(n_chan)
 
     Y = np.zeros((n_frames, n_freq, K), dtype=complex)
 
@@ -136,13 +145,18 @@ def ip_bruteforce(X, n_iter, alpha, model="laplace", eps=1e-10):
             for k in range(K):
                 for f in range(n_freq):
                     # WV = W V_k
+                    Vk = np.zeros((n_chan, n_chan), dtype=complex)
+                    for i in range(n_chan):
+                        for j in range(n_chan):
+                            Vk[i, j] = V[k, f, i, j] + (reg if i == j else 0.0)
+
                     WV = np.zeros((n_chan, n_chan), dtype=complex)
                     for m in range(n_chan):
                         for i in range(n_chan):
                             acc2 = 0j
                             for j in range(n_chan):
-                                acc2 += W[f, m, j] * V[k, f, j, i]
-                            WV[m, i] = acc2 + (eps if m == i else 0.0)
+                                acc2 += W[f, m, j] * Vk[j, i]
+                            WV[m, i] = acc2
 
                     e = np.zeros(n_chan, dtype=complex)
                     e[k] = 1.0
@@ -151,10 +165,10 @@ def ip_bruteforce(X, n_iter, alpha, model="laplace", eps=1e-10):
                     # normalize by sqrt(w^H V_k w)
                     Vw = np.zeros(n_chan, dtype=complex)
                     for i in range(n_chan):
-                        s = 0j
+                        acc3 = 0j
                         for j in range(n_chan):
-                            s += V[k, f, i, j] * w[j]
-                        Vw[i] = s
+                            acc3 += Vk[i, j] * w[j]
+                        Vw[i] = acc3
                     den = 0j
                     for i in range(n_chan):
                         den += np.conj(w[i]) * Vw[i]

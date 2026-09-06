@@ -58,7 +58,8 @@ def auxiva_ip_online(
 
     Parameters are the same as auxiva_iss_online, except that ``V0``
     initializes the per-source weighted covariance used by the IP
-    update. See auxiva_iss_online for details.
+    update; it defaults to a scale-matched multiple of the identity
+    derived from the input. See auxiva_iss_online for details.
 
     Returns
     -------
@@ -76,12 +77,26 @@ def auxiva_ip_online(
         if W0 is None
         else W0.copy()
     )
-    # Power-matched prior, identical to the ISS module's, so the two
-    # start from the same place. See the comment there.
+    # Scale-matched prior, computed identically to the ISS module's.
+    # See the comment there for why the input power alone is the wrong
+    # scale. Change one, change both.
+    Xw = X[: min(n_frames, 50)]
+    p0 = np.mean(np.abs(Xw) ** 2)                 # mean per-bin power
+    e0 = np.mean(np.sum(np.abs(Xw) ** 2, axis=1))  # mean across-frequency energy
+    if model == "laplace":
+        u0 = p0 / (2.0 * np.sqrt(e0) + eps)        # phi ~ 1 / (2r)
+    else:
+        u0 = n_freq * p0 / (e0 + eps)              # phi ~ n_freq / r^2
+
+    # Diagonal loading for the solve, scaled to the data. An absolute
+    # constant does not track the input gain and would not prevent a
+    # LinAlgError on a quiet stretch, which in a streaming run is fatal
+    # where ISS merely degrades through its denominator floor.
+    reg = 1e-6 * u0
+
     if V0 is None:
-        p0 = np.mean(np.abs(X[: min(n_frames, 50)]) ** 2)
         V = np.tile(
-            (p0 + eps) * np.eye(n_chan, dtype=X.dtype), (n_src, n_freq, 1, 1)
+            (u0 + eps) * np.eye(n_chan, dtype=X.dtype), (n_src, n_freq, 1, 1)
         )
     else:
         V = V0.copy()
@@ -106,9 +121,7 @@ def auxiva_ip_online(
             # ---- the two modules differ only in the sweep below
             Y_all = (W @ x_t[:, :, None])[..., 0]                # (n_freq, n_src)
             r_all = np.sqrt(np.sum(np.abs(Y_all) ** 2, axis=0))  # (n_src,)
-            phi_all = np.array(
-                [_phi(r, model, n_freq, eps) for r in r_all]
-            )
+            phi_all = _phi(r_all, model, n_freq, eps)            # (n_src,)
 
             V = alpha * V_prev + (1 - alpha) * phi_all[:, None, None, None] * xxH[None]
 
@@ -116,9 +129,13 @@ def auxiva_ip_online(
             # ---- linear solve per frequency bin.
             for k in range(n_src):
 
-                # Small diagonal loading keeps the solve well posed; the
-                # ISS side has the equivalent guard on its denominator.
-                WV = W @ V[k] + eps * eyes[None]
+                # Load V[k] itself, which is Hermitian positive
+                # semi-definite, rather than the product W @ V[k], which
+                # is neither: adding to the latter is not regularization
+                # in the usual sense. The same loaded matrix is then used
+                # for the normalization, so the two stay consistent.
+                Vk = V[k] + reg * eyes[None]
+                WV = W @ Vk
 
                 e_k = np.broadcast_to(eyes[:, k], (n_freq, n_chan))
                 # The trailing axis is explicit: numpy 2.0 changed how a
@@ -130,7 +147,7 @@ def auxiva_ip_online(
                 # normalize: w_k <- w_k / sqrt(w_k^H V_k w_k). w_new is
                 # the true (unconjugated) vector here, so this is the
                 # plain Hermitian form.
-                Vw = (V[k] @ w_new[:, :, None])[..., 0]
+                Vw = (Vk @ w_new[:, :, None])[..., 0]
                 denom = np.real(np.sum(np.conj(w_new) * Vw, axis=-1))
                 denom = np.maximum(denom, eps)
                 w_new = w_new / np.sqrt(denom)[:, None]

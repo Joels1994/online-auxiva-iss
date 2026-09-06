@@ -104,7 +104,8 @@ def auxiva_iss_online(
         frequency bin.
     U0: ndarray (n_src, n_freq, n_chan, n_chan), optional
         Initial per-source spatial covariance estimates. Defaults to a
-        small multiple of the identity per source/frequency.
+        scale-matched multiple of the identity, derived from the input
+        so that it sits near where the recursion settles.
     callback: callable, optional
         If given, called as ``callback(y_t, t)`` after each frame is
         processed, with ``y_t`` of shape (n_freq, n_src).
@@ -125,16 +126,25 @@ def auxiva_iss_online(
         if W0 is None
         else W0.copy()
     )
-    # Power-matched prior. A fixed 0.01 * I is arbitrary relative to the
-    # signal level: too large it dominates for many frames, too small it
-    # leaves the first denominators near zero. Scaling by the observed
-    # input power makes the initial condition behave the same way at any
-    # input gain. The IP baseline uses an identical prior so the two
-    # start from the same place.
+    # Scale-matched prior. A fixed 0.01 * I is arbitrary relative to the
+    # signal level, but so is the input power on its own: the recursion
+    # accumulates phi(r) * x x^H, and phi carries units of 1/amplitude,
+    # so the covariance settles at power/amplitude rather than at power.
+    # Using the power alone overshoots by a large factor (measured 68x
+    # on one test signal); the expression below lands within 1%.
+    #
+    # The IP baseline computes this identically. Change one, change both.
+    Xw = X[: min(n_frames, 50)]
+    p0 = np.mean(np.abs(Xw) ** 2)                 # mean per-bin power
+    e0 = np.mean(np.sum(np.abs(Xw) ** 2, axis=1))  # mean across-frequency energy
+    if model == "laplace":
+        u0 = p0 / (2.0 * np.sqrt(e0) + eps)        # phi ~ 1 / (2r)
+    else:
+        u0 = n_freq * p0 / (e0 + eps)              # phi ~ n_freq / r^2
+
     if U0 is None:
-        p0 = np.mean(np.abs(X[: min(n_frames, 50)]) ** 2)
         U = np.tile(
-            (p0 + eps) * np.eye(n_chan, dtype=X.dtype), (n_src, n_freq, 1, 1)
+            (u0 + eps) * np.eye(n_chan, dtype=X.dtype), (n_src, n_freq, 1, 1)
         )
     else:
         U = U0.copy()
@@ -173,9 +183,7 @@ def auxiva_iss_online(
             # only in the update rule below.
             Y_all = (W @ x_t[:, :, None])[..., 0]                # (n_freq, n_src)
             r_all = np.sqrt(np.sum(np.abs(Y_all) ** 2, axis=0))  # (n_src,)
-            phi_all = np.array(
-                [_phi(r, model, n_freq, eps) for r in r_all]
-            )
+            phi_all = _phi(r_all, model, n_freq, eps)            # (n_src,)
 
             U = alpha * U_prev + (1 - alpha) * phi_all[:, None, None, None] * xxH[None]
 
@@ -204,7 +212,10 @@ def auxiva_iss_online(
                 )  # w_k^H U[m] w_k, shape (n_src, n_freq)
                 denom = np.maximum(denom, eps)
 
-                W_rows = np.transpose(W, (1, 0, 2))  # (n_src, n_freq, n_chan)
+                # copied, not a view: numer happens to be materialized
+                # before W is modified below, but that is an accident of
+                # statement order rather than something enforced
+                W_rows = np.transpose(W, (1, 0, 2)).copy()
                 numer = np.sum(
                     W_rows * Uk_wk, axis=-1
                 )  # w_m^H U[m] w_k, shape (n_src, n_freq)

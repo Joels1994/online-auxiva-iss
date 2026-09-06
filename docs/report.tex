@@ -701,11 +701,27 @@ A timing comparison is only meaningful if the two modules differ solely in the
 update rule. Four changes were made to enforce this, and one proposed change was
 rejected on evidence.
 
-\paragraph{Power-matched prior.} Both modules initialised their covariance to
-$0.01\,\boldsymbol{I}$, which is arbitrary relative to the signal level. Both now
-use $\bar{p}\,\boldsymbol{I}$ with $\bar{p}$ the mean input power over the first
-fifty frames, so the initial condition behaves identically at any input gain.
-This improved separation on speech by roughly $0.5$~dB.
+\paragraph{Scale-matched prior.} Both modules initialised their covariance to
+$0.01\,\boldsymbol{I}$, which is arbitrary relative to the signal level. The
+input power alone is also the wrong scale: the recursion accumulates
+$\varphi(r)\,\x\x\herm$, and $\varphi$ carries units of inverse amplitude, so the
+covariance settles at power over amplitude rather than at power. Measured on a
+test signal, the steady-state mean diagonal was $0.265$ while the mean input
+power was $18.04$, an overshoot of $68\times$. Both modules now use
+%
+\begin{equation}
+u_0 =
+\begin{cases}
+\bar{p} \big/ \left(2\sqrt{\bar{e}}\right) & \text{Laplace},\\[0.4em]
+F\bar{p} \big/ \bar{e} & \text{Gauss},
+\end{cases}
+\end{equation}
+%
+with $\bar{p}$ the mean per-bin power and $\bar{e}$ the mean across-frequency
+energy over the first fifty frames. This lands within $1\%$ of the settled
+value. The consequence is that separation quality becomes invariant to input
+gain: the Amari distance measured $0.0090$ at every gain from $10^{-3}$ to
+$10^{3}$, where previously the arbitrary prior made behaviour gain-dependent.
 
 \paragraph{Two-pass sweep.} Previously each source refreshed its own $r_k$ and
 $\U_k$ as its turn arrived, so source $m$'s covariance was current if $m$ had
@@ -723,6 +739,24 @@ passed with shape $(F, M)$, which NumPy~1.x interprets as a stack of vectors.
 NumPy~2.0 changed that rule and raises \texttt{ValueError} unless $F = M$.
 Confirmed by running under both versions. The trailing axis is now explicit, and
 both modules were verified to run under NumPy 2.0.2 as well as 1.23.
+
+
+\paragraph{Regularising the right matrix.} The IP solve was loaded as
+$\W\V_k + \epsilon\boldsymbol{I}$. That product is not Hermitian, so adding to it
+is not regularisation in the usual sense. The loading now applies to $\V_k$
+itself, which is Hermitian positive semi-definite, and the same loaded matrix is
+reused for the normalisation so the two remain consistent. The constant is also
+now relative, $10^{-6}u_0$, rather than absolute: a fixed $10^{-10}$ does not
+track the input gain and would not prevent a \texttt{LinAlgError} on a quiet
+stretch, which in a streaming run is fatal, whereas ISS merely degrades through
+its denominator floor.
+
+\paragraph{Two smaller items.} The per-source weight $\varphi$ is already
+vectorised, so the list comprehension around it was removed in both modules,
+keeping pass one byte-identical. And the transposed view of $\W$ used in the ISS
+numerator is now copied: it was safe only because the numerator happened to be
+materialised before $\W$ was modified three lines later, which is an accident of
+statement order rather than something enforced.
 
 \paragraph{Rejected: a warm-up gate on the ISS pivot rescaling.} It was proposed
 to disable ISS's self-normalisation for the first $3/(1-\alpha)$ frames. This
