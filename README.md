@@ -92,8 +92,8 @@ between files. Scores for that run:
 
 | Method | SDR (dB) | SIR (dB) |
 | --- | --- | --- |
-| Online ISS | 0.59 / 0.25 | 12.94 / 17.79 |
-| Online IP | 0.59 / 0.25 | 13.09 / 17.77 |
+| Online ISS | 0.53 / 0.60 | 12.33 / 17.65 |
+| Online IP | 0.51 / 0.58 | 12.25 / 17.72 |
 
 Measured at a genuine 15 dB SNR, with the default 1024-sample block.
 The saved segment is the final repetition of the mixture, since the

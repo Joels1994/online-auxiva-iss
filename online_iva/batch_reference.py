@@ -34,6 +34,7 @@ The contrast with the online versions is the point of this module:
 import numpy as np
 
 from .projection_back import project_back
+from .auxiva_iss_online import _phi
 
 
 def tensor_H(X):
@@ -64,14 +65,9 @@ def auxiva_iss_batch(
 
     for _ in range(n_iter):
 
-        if model == "laplace":
-            r_inv[:, :] = 1.0 / np.maximum(eps, 2.0 * np.linalg.norm(Y, axis=0))
-        elif model == "gauss":
-            r_inv[:, :] = 1.0 / np.maximum(
-                eps, (np.linalg.norm(Y, axis=0) ** 2) / n_freq
-            )
-        else:
-            raise ValueError(f"No such model {model}")
+        # same weight rule as the online modules, kept in one place so a
+        # change to one is a change to all
+        r_inv[:, :] = _phi(np.linalg.norm(Y, axis=0), model, n_freq, eps)
 
         for s in range(n_src):
             # Contractions over TIME, no M-by-M matrix anywhere: this is
@@ -90,8 +86,14 @@ def auxiva_iss_batch(
             )
             v_denom = r_inv[None, :, :] @ np.abs(Y[:, s, :, None]) ** 2
 
-            v[:, :] = v_num / v_denom[:, :, 0]
-            v[:, s] -= 1 / np.sqrt(v_denom[:, s, 0])
+            # Floored exactly as in auxiva_iss_online. Without this a
+            # silent stretch drives the denominator to zero and the
+            # self-update term to infinity; the online module has always
+            # had the guard and the batch one should match it.
+            v_den = np.maximum(v_denom[:, :, 0], eps)
+
+            v[:, :] = v_num / v_den
+            v[:, s] -= 1 / np.sqrt(v_den[:, s])
 
             Y[:, :, :] -= v[:, :, None] * Y[:, s, None, :]
 
@@ -128,26 +130,37 @@ def auxiva_ip_batch(
 
     for _ in range(n_iter):
 
-        if model == "laplace":
-            r_inv[:, :] = 1.0 / np.maximum(eps, 2.0 * np.linalg.norm(Y, axis=0))
-        elif model == "gauss":
-            r_inv[:, :] = 1.0 / np.maximum(
-                eps, (np.linalg.norm(Y, axis=0) ** 2) / n_freq
-            )
-        else:
-            raise ValueError(f"No such model {model}")
+        # same weight rule as the online modules, kept in one place so a
+        # change to one is a change to all
+        r_inv[:, :] = _phi(np.linalg.norm(Y, axis=0), model, n_freq, eps)
 
         for s in range(n_src):
             # an M-by-M weighted covariance, then a solve, per source
             V = (X * r_inv[None, s, None, :]) @ tensor_H(X) / n_frames
 
-            WV = W @ V
-            W[:, s, :] = np.conj(np.linalg.solve(WV, eyes[:, :, s]))
+            # Diagonal loading, scaled to this covariance rather than an
+            # absolute constant, matching auxiva_ip_online. Applied
+            # distributively so the loaded matrix is never materialized:
+            #     W @ (V + reg I) = W @ V + reg W
+            reg = 1e-6 * np.mean(np.real(np.diagonal(V, axis1=-2, axis2=-1)))
 
+            WV = W @ V
+            WV += reg * W
+
+            # The trailing axis is explicit: numpy 2.0 changed how a
+            # right-hand side of shape (n_freq, n_chan) is interpreted,
+            # and without it solve raises there while working on 1.x.
+            e_s = np.broadcast_to(eyes[0, :, s], (n_freq, n_chan))
+            W[:, s, :] = np.conj(
+                np.linalg.solve(WV, e_s[..., None])[..., 0]
+            )
+
+            # likewise w^H (V + reg I) w = w^H V w + reg |w|^2
             denom = np.real(
                 W[:, None, s, :] @ V[:, :, :] @ np.conj(W[:, s, :, None])
-            )
-            W[:, s, :] /= np.sqrt(np.maximum(eps, denom[:, :, 0]))
+            )[:, :, 0]
+            denom = denom + reg * np.sum(np.abs(W[:, s, :]) ** 2, axis=-1)[:, None]
+            W[:, s, :] /= np.sqrt(np.maximum(eps, denom))
 
         Y[:, :, :] = W[:, :n_src, :] @ X
 
